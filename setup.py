@@ -58,7 +58,7 @@ def read_version(*file_paths):
 
 # Extensions Compilation arguments #
 if sys.platform.lower().startswith("win"):
-    extra_compile_args = ["-O2"]
+    extra_compile_args = ['-std=c++11',"-O2"]
 else:
     extra_compile_args = ['-std=c++11', "-O3"]
 
