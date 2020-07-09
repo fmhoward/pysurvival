@@ -103,8 +103,7 @@ class BaseMultiTaskModel(BaseModel):
         if 0. <= extra_pct_time <= 1.:
             p = extra_pct_time
         else:
-            raise Exception("extra_pct_time has to be between [0, 1].") 
-
+            raise Exception("extra_pct_time has to be between [0, 1].")
         # Building time points and time buckets
         self.times = np.linspace(min_time, max_time*(1. + p), self.bins)
         self.get_time_buckets()
@@ -149,8 +148,7 @@ class BaseMultiTaskModel(BaseModel):
         X_uncens = torch.FloatTensor(X_uncens)
         Y_cens = torch.FloatTensor(Y_cens)
         Y_uncens = torch.FloatTensor(Y_uncens)
-
-        return X_cens, X_uncens, Y_cens, Y_uncens 
+        return X_cens, X_uncens, Y_cens, Y_uncens
         
 
     def loss_function(self, model, X_cens, X_uncens, Y_cens, Y_uncens, 
@@ -365,12 +363,20 @@ class BaseMultiTaskModel(BaseModel):
         Triangle = np.tri(self.num_times, self.num_times + 1, dtype=np.float32) 
         Triangle = torch.FloatTensor(Triangle)
 
+        if HAS_GPU:
+            model = model.cuda()
+            X_cens = X_cens.cuda()
+            X_uncens = X_uncens.cuda()
+            Y_cens = Y_cens.cuda()
+            Y_uncens = Y_uncens.cuda()
+            Triangle = Triangle.cuda()
         # Performing order 1 optimization
         model, loss_values = opt.optimize(self.loss_function, model, optimizer, 
             lr, num_epochs, verbose,  X_cens=X_cens, X_uncens=X_uncens, 
             Y_cens=Y_cens, Y_uncens=Y_uncens, Triangle=Triangle, 
             l2_reg=l2_reg, l2_smooth=l2_smooth)
 
+        model = model.cpu()
         # Saving attributes
         self.model = model.eval()
         self.loss_values = loss_values
@@ -430,6 +436,247 @@ class BaseMultiTaskModel(BaseModel):
             return hazard, density, Survival
         else:
             min_abs_value = [abs(a_j_1-t) for (a_j_1, a_j) in self.time_buckets]
+            index = np.argmin(min_abs_value)
+            return hazard[:, index], density[:, index], Survival[:, index]
+
+    def validateFit(self, X, T, E, VX, VT, VE, init_method='glorot_uniform', optimizer='adam',
+            lr=1e-4, num_epochs=1000, dropout=0.2, l2_reg=1e-2,
+            l2_smooth=1e-2, batch_normalization=False, bn_and_dropout=False,
+            verbose=True, extra_pct_time=0.1, is_min_time_zero=True):
+        """ Fit the estimator based on the given parameters.
+
+        Parameters:
+        -----------
+        * `X` : **array-like**, *shape=(n_samples, n_features)* --
+            The input samples.
+
+        * `T` : **array-like** --
+            The target values describing when the event of interest or censoring
+            occurred.
+
+        * `E` : **array-like** --
+            The values that indicate if the event of interest occurred i.e.:
+            E[i]=1 corresponds to an event, and E[i] = 0 means censoring,
+            for all i.
+
+        * `init_method` : **str** *(default = 'glorot_uniform')* --
+            Initialization method to use. Here are the possible options:
+
+            * `glorot_uniform`: Glorot/Xavier uniform initializer
+            * `he_uniform`: He uniform variance scaling initializer
+            * `uniform`: Initializing tensors with uniform (-1, 1) distribution
+            * `glorot_normal`: Glorot normal initializer,
+            * `he_normal`: He normal initializer.
+            * `normal`: Initializing tensors with standard normal distribution
+            * `ones`: Initializing tensors to 1
+            * `zeros`: Initializing tensors to 0
+            * `orthogonal`: Initializing tensors with a orthogonal matrix,
+
+        * `optimizer`:  **str** *(default = 'adam')* --
+            iterative method for optimizing a differentiable objective function.
+            Here are the possible options:
+
+            - `adadelta`
+            - `adagrad`
+            - `adam`
+            - `adamax`
+            - `rmsprop`
+            - `sparseadam`
+            - `sgd`
+
+        * `lr`: **float** *(default=1e-4)* --
+            learning rate used in the optimization
+
+        * `num_epochs`: **int** *(default=1000)* --
+            The number of iterations in the optimization
+
+        * `dropout`: **float** *(default=0.5)* --
+            Randomly sets a fraction rate of input units to 0
+            at each update during training time, which helps prevent overfitting.
+
+        * `l2_reg`: **float** *(default=1e-4)* --
+            L2 regularization parameter for the model coefficients
+
+        * `l2_smooth`: **float** *(default=1e-4)* --
+            Second L2 regularizer that ensures the parameters vary smoothly
+            across consecutive time points.
+
+        * `batch_normalization`: **bool** *(default=True)* --
+            Applying Batch Normalization or not
+
+        * `bn_and_dropout`: **bool** *(default=False)* --
+            Applying Batch Normalization and Dropout at the same time
+
+        * `display_loss`: **bool** *(default=True)* --
+            Whether or not showing the loss function values at each update
+
+        * `verbose`: **bool** *(default=True)* --
+            Whether or not producing detailed logging about the modeling
+
+        * `extra_pct_time`: **float** *(default=0.1)* --
+            Providing an extra fraction of time in the time axis
+
+        * `is_min_time_zero`: **bool** *(default=True)* --
+            Whether the the time axis starts at 0
+
+        **Returns:**
+
+        * self : object
+
+
+        Example:
+        --------
+
+        #### 1 - Importing packages
+        import numpy as np
+        import pandas as pd
+        from matplotlib import pyplot as plt
+        from sklearn.model_selection import train_test_split
+        from pysurvival.models.simulations import SimulationModel
+        from pysurvival.models.multi_task import LinearMultiTaskModel
+        from pysurvival.utils.metrics import concordance_index
+        #%matplotlib inline  # To use with Jupyter notebooks
+
+
+        #### 2 - Generating the dataset from a Weibull parametric model
+        # Initializing the simulation model
+        sim = SimulationModel( survival_distribution = 'Weibull',
+                               risk_type = 'linear',
+                               censored_parameter = 10.0,
+                               alpha = .01, beta = 3.0 )
+
+        # Generating N random samples
+        N = 1000
+        dataset = sim.generate_data(num_samples = N, num_features = 3)
+
+        # Showing a few data-points
+        time_column = 'time'
+        event_column = 'event'
+        dataset.head(2)
+
+        #### 3 - Creating the modeling dataset
+        # Defining the features
+        features = sim.features
+
+        # Building training and testing sets #
+        index_train, index_test = train_test_split( range(N), test_size = 0.2)
+        data_train = dataset.loc[index_train].reset_index( drop = True )
+        data_test  = dataset.loc[index_test].reset_index( drop = True )
+
+        # Creating the X, T and E input
+        X_train, X_test = data_train[features], data_test[features]
+        T_train, T_test = data_train['time'].values, data_test['time'].values
+        E_train, E_test = data_train['event'].values, data_test['event'].values
+
+        #### 4 - Initializing a MTLR model and fitting the data.
+        # Building a Linear model
+        mtlr = LinearMultiTaskModel(bins=50)
+        mtlr.fit(X_train, T_train, E_train, lr=5e-3, init_method='orthogonal')
+
+        # Building a Neural MTLR
+        # structure = [ {'activation': 'Swish', 'num_units': 150},  ]
+        # mtlr = NeuralMultiTaskModel(structure=structure, bins=150)
+        # mtlr.fit(X_train, T_train, E_train, lr=5e-3, init_method='adam')
+
+        #### 5 - Cross Validation / Model Performances
+        c_index = concordance_index(mtlr, X_test, T_test, E_test) #0.95
+        print('C-index: {:.2f}'.format(c_index))
+
+        """
+
+        # Checking data format (i.e.: transforming into numpy array)
+        X, T, E = utils.check_data(X, T, E)
+        VX, VT, VE = utils.check_data(VX, VT, VE)
+        # Extracting data parameters
+        nb_units, self.num_vars = X.shape
+        input_shape = self.num_vars
+
+        # Scaling data
+        if self.auto_scaler:
+            X = self.scaler.fit_transform(X)
+            VX = self.scaler.fit_transform(VX)
+
+            # Building the time axis, time buckets and output Y
+        X_cens, X_uncens, Y_cens, Y_uncens \
+            = self.compute_XY(X, T, E, is_min_time_zero, extra_pct_time)
+        VX_cens, VX_uncens, VY_cens, VY_uncens \
+            = self.compute_XY(VX, VT, VE, is_min_time_zero, extra_pct_time)
+
+        # Initializing the model
+        model = nn.NeuralNet(input_shape, self.num_times, self.structure,
+                             init_method, dropout, batch_normalization,
+                             bn_and_dropout)
+
+        # Creating the Triangular matrix
+        Triangle = np.tri(self.num_times, self.num_times + 1, dtype=np.float32)
+        Triangle = torch.FloatTensor(Triangle)
+
+        # Performing order 1 optimization
+        model, loss_values = opt.validateOptimize(self.loss_function, model, optimizer,
+                                          VX_cens, VX_uncens,VY_cens, VY_uncens, Triangle,
+                                          l2_reg, l2_smooth,
+                                          lr, num_epochs, verbose, X_cens=X_cens, X_uncens=X_uncens,
+                                          Y_cens=Y_cens, Y_uncens=Y_uncens, Triangle=Triangle,
+                                          l2_reg=l2_reg, l2_smooth=l2_smooth)
+
+        # Saving attributes
+        self.model = model.eval()
+        self.loss_values = loss_values
+
+        return self
+
+    def predict(self, x, t=None):
+        """ Predicting the hazard, density and survival functions
+
+        Parameters:
+        ----------
+        * `x` : **array-like** *shape=(n_samples, n_features)* --
+            array-like representing the datapoints.
+            x should not be standardized before, the model
+            will take care of it
+
+        * `t`: **double** *(default=None)* --
+             time at which the prediction should be performed.
+             If None, then return the function for all available t.
+        """
+
+        # Convert x into the right format
+        x = utils.check_data(x)
+
+        # Scaling the data
+        if self.auto_scaler:
+            if x.ndim == 1:
+                x = self.scaler.transform(x.reshape(1, -1))
+            elif x.ndim == 2:
+                x = self.scaler.transform(x)
+        else:
+            # Ensuring x has 2 dimensions
+            if x.ndim == 1:
+                x = np.reshape(x, (1, -1))
+
+        # Transforming into pytorch objects
+        x = torch.FloatTensor(x)
+
+        # Predicting using linear/nonlinear function
+        score_torch = self.model(x)
+        score = score_torch.data.numpy()
+
+        # Cretaing the time triangles
+        Triangle1 = np.tri(self.num_times, self.num_times + 1)
+        Triangle2 = np.tri(self.num_times + 1, self.num_times + 1)
+
+        # Calculating the score, density, hazard and Survival
+        phi = np.exp(np.dot(score, Triangle1))
+        div = np.repeat(np.sum(phi, 1).reshape(-1, 1), phi.shape[1], axis=1)
+        density = (phi / div)
+        Survival = np.dot(density, Triangle2)
+        hazard = density[:, :-1] / Survival[:, 1:]
+
+        # Returning the full functions of just one time point
+        if t is None:
+            return hazard, density, Survival
+        else:
+            min_abs_value = [abs(a_j_1 - t) for (a_j_1, a_j) in self.time_buckets]
             index = np.argmin(min_abs_value)
             return hazard[:, index], density[:, index], Survival[:, index]
 

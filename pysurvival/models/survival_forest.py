@@ -430,6 +430,28 @@ class BaseSurvivalForest(BaseModel):
             index = np.argmin(min_index)
             return hazard[:, index], density[:, index], survival[:, index]
 
+    def predict_chunk(self, X, t = 1, num_threads=-1):
+
+        # Checking if the data has the right format
+        X = utils.check_data(X)
+        if X.ndim == 1:
+            X = X.reshape(1,-1)
+        T = np.array([1.]*X.shape[0])
+        E = np.array([1.]*X.shape[0])
+        input_data = np.c_[T, E, X]
+        n_rows, n_cols = input_data.shape
+        nparts = round(n_rows / 1000)
+        split_array = np.array_split(input_data, nparts)
+        survival = np.empty(n_rows)
+        self.load_properties()
+        min_index = [abs(a_j_1 - t) for (a_j_1, a_j) in self.time_buckets]
+        index = np.argmin(min_index)
+        survIndex = 0
+        for s in split_array:
+            survival[survIndex:(survIndex + np.size(s, axis=0))] = np.array(self.model.predict_survival(s,num_threads))[:,index]
+            survIndex += np.size(s, axis=0)
+            #print(survIndex)
+        return survival
 
     def predict_risk(self, X, num_threads=-1):
 
@@ -448,6 +470,30 @@ class BaseSurvivalForest(BaseModel):
         risk = self.model.predict_risk(input_data, num_threads)
         return np.array(risk)
 
+    def predict_risk_chunk(self, X, num_threads=-1, printChunk = False):
+
+        # Checking if the data has the right format
+        X = utils.check_data(X)
+        if X.ndim == 1:
+            X = X.reshape(1,-1)
+        T = np.array([1.]*X.shape[0])
+        E = np.array([1.]*X.shape[0])
+        input_data = np.c_[T, E, X]
+
+        # Loading the attributes of the model
+        self.load_properties()
+        n_rows, n_cols = input_data.shape
+        nparts = round(n_rows / 1000)
+        split_array = np.array_split(input_data, nparts)
+        survival = np.empty(n_rows)
+        survIndex = 0
+        for s in split_array:
+            survival[survIndex:(survIndex + np.size(s, axis=0))] = np.array(self.model.predict_risk(s,num_threads))
+            survIndex += np.size(s, axis=0)
+            #if printChunk:
+                #print(survIndex)
+        # Computing risk
+        return survival
 
     def save_properties(self):
         """ Loading the properties of the model """

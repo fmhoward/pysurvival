@@ -420,43 +420,43 @@ class NonLinearCoxPHModel(BaseModel):
         Efron_anti_one = torch.FloatTensor(Efron_anti_one)        
         return Efron_coef, Efron_one, Efron_anti_one
 
-
-    def loss_function(self, model, X, Risk, Fail, 
+    def loss_function(self, model, X, Risk, Fail,
                       Efron_coef, Efron_one, Efron_anti_one, l2_reg):
-        """ Efron's approximation loss function by vectorizing 
+        """ Efron's approximation loss function by vectorizing
             all the quantities at stake
         """
 
         # Calculating the score
         pre_score = model(X)
-        score = torch.reshape( torch.exp(pre_score), (-1, 1) )
+        score = torch.reshape(torch.exp(pre_score), (-1, 1))
         max_nb_fails = Efron_coef.shape[1]
 
         # Numerator calculation
-        log_score = torch.log( score )
-        log_fail  = torch.mm(Fail, log_score)
-        numerator = torch.sum(log_fail)  
+        log_score = torch.log(score)
+        if HAS_GPU:
+            log_score = log_score.cuda()
+        log_fail = torch.mm(Fail.cuda(), log_score.cuda())
+        numerator = torch.sum(log_fail)
 
         # Denominator calculation
-        risk_score = torch.reshape( torch.mm(Risk, score), (-1,1) )
-        risk_score = risk_score.repeat(1, max_nb_fails)        
-        
-        fail_score = torch.reshape( torch.mm(Fail, score), (-1,1) )
+        risk_score = torch.reshape(torch.mm(Risk.cuda(), score.cuda()), (-1, 1))
+        risk_score = risk_score.repeat(1, max_nb_fails)
+
+        fail_score = torch.reshape(torch.mm(Fail.cuda(), score.cuda()), (-1, 1))
         fail_score = fail_score.repeat(1, max_nb_fails)
-        
-        Efron_Fail  = fail_score*Efron_coef 
-        Efron_Risk  = risk_score*Efron_one
-        log_efron   = torch.log( Efron_Risk - Efron_Fail + Efron_anti_one)
-                
-        denominator = torch.sum( torch.sum(log_efron, dim=1) )  
-        
+
+        Efron_Fail = fail_score * Efron_coef
+        Efron_Risk = risk_score * Efron_one
+        log_efron = torch.log(Efron_Risk - Efron_Fail + Efron_anti_one)
+
+        denominator = torch.sum(torch.sum(log_efron, dim=1))
+
         # Adding regularization
         loss = - (numerator - denominator)
         for w in model.parameters():
-            loss += l2_reg*torch.sum(w*w)/2.
-            
-        return loss
+            loss += l2_reg * torch.sum(w * w) / 2.
 
+        return loss
 
     def fit(self, X, T, E, init_method = 'glorot_uniform',
             optimizer ='adam', lr = 1e-4, num_epochs = 1000,
@@ -629,8 +629,16 @@ class NonLinearCoxPHModel(BaseModel):
         Efron_coef, Efron_one, Efron_anti_one = self.efron_matrix()
         Efron_coef = torch.FloatTensor(Efron_coef) 
         Efron_one = torch.FloatTensor(Efron_one) 
-        Efron_anti_one = torch.FloatTensor(Efron_anti_one) 
+        Efron_anti_one = torch.FloatTensor(Efron_anti_one)
 
+        if HAS_GPU:
+            model = model.cuda()
+            X = X.cuda()
+            Risk = Risk.cuda()
+            Fail = Fail.cuda()
+            Efron_coef = Efron_coef.cuda()
+            Efron_one = Efron_one.cuda()
+            Efron_anti_one = Efron_anti_one.cuda()
         # Performing order 1 optimization
         model, loss_values = opt.optimize(self.loss_function, model, optimizer, 
             lr, num_epochs, verbose, X=X, Risk=Risk, Fail=Fail, 
@@ -644,6 +652,7 @@ class NonLinearCoxPHModel(BaseModel):
         # Computing baseline functions
         x = X_original
         x = torch.FloatTensor(x)
+        model = model.cpu()
 
         # Calculating risk_score
         score = np.exp(self.model(torch.FloatTensor(x)).data.numpy().flatten())
